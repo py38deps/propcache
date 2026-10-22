@@ -22,9 +22,6 @@ env:
   FORCE_COLOR: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_PYTHON_VERSION_WARNING: 1
-  # Pin the Cython version that generates the C extension: 3.2.4 is the last
-  # release that runs on Python 3.8, newer versions require Python 3.9+.
-  PIP_CONSTRAINT: requirements/cython.txt
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: 1
 
