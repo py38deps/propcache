@@ -1,7 +1,14 @@
 # cython: language_level=3, freethreading_compatible=True
-from types import GenericAlias
+import sys
 
-from cpython.dict cimport PyDict_GetItemRef
+if sys.version_info >= (3, 9):
+    from types import GenericAlias
+else:
+
+    def GenericAlias(cls, args):
+        return cls
+
+
 from cpython.object cimport PyObject
 
 
@@ -11,16 +18,49 @@ cdef extern from *:
     # without another incref, so a cache hit costs a single incref.
     """
     #define propcache_steal(value) (value)
+
+    /* Python 3.13+ can hand out a strong reference directly. Older
+       versions only offer a borrowed reference, so incref it here; they
+       have no free-threaded build, and the GIL keeps the lookup and the
+       incref atomic for the string keys used by this module. */
+    static int
+    propcache_dict_get_item_ref(PyObject *dict, PyObject *key, PyObject **value)
+    {
+    #if PY_VERSION_HEX >= 0x030D0000
+        return PyDict_GetItemRef(dict, key, value);
+    #else
+        PyObject *item = PyDict_GetItemWithError(dict, key);
+        if (item == NULL) {
+            if (PyErr_Occurred()) {
+                return -1;
+            }
+            *value = NULL;
+            return 0;
+        }
+        Py_INCREF(item);
+        *value = item;
+        return 1;
+    #endif
+    }
+
+    /* PyObject_CallOneArg only exists since Python 3.9. The fallback
+       allocates a one-element argument tuple, but it only runs on cache
+       misses. */
+    static PyObject *
+    propcache_call_one_arg(PyObject *callable, PyObject *arg)
+    {
+    #if PY_VERSION_HEX >= 0x03090000
+        return PyObject_CallOneArg(callable, arg);
+    #else
+        return PyObject_CallFunctionObjArgs(callable, arg, NULL);
+    #endif
+    }
     """
     object propcache_steal(PyObject* value)
-
-
-cdef extern from "Python.h":
-    # Call a callable Python object callable with exactly
-    # 1 positional argument arg and no keyword arguments.
-    # Return the result of the call on success, or raise
-    # an exception and return NULL on failure.
-    object PyObject_CallOneArg(object callable, object arg)
+    int propcache_dict_get_item_ref(
+        object dict, object key, PyObject** value
+    ) except -1
+    object propcache_call_one_arg(object callable, object arg)
 
 
 cdef class under_cached_property:
@@ -50,9 +90,9 @@ cdef class under_cached_property:
         cdef PyObject* val
         # PyDict_GetItemRef returns a strong reference, a borrowed one
         # could be freed by a concurrent eviction on free-threaded builds.
-        if PyDict_GetItemRef(cache, self.name, &val):
+        if propcache_dict_get_item_ref(cache, self.name, &val):
             return propcache_steal(val)
-        result = PyObject_CallOneArg(self.wrapped, inst)
+        result = propcache_call_one_arg(self.wrapped, inst)
         cache[self.name] = result
         return result
 
@@ -102,9 +142,9 @@ cdef class cached_property:
         cdef PyObject* val
         # PyDict_GetItemRef returns a strong reference, a borrowed one
         # could be freed by a concurrent eviction on free-threaded builds.
-        if PyDict_GetItemRef(cache, self.name, &val):
+        if propcache_dict_get_item_ref(cache, self.name, &val):
             return propcache_steal(val)
-        result = PyObject_CallOneArg(self.func, inst)
+        result = propcache_call_one_arg(self.func, inst)
         cache[self.name] = result
         return result
 

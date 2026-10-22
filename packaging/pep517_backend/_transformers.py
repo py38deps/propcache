@@ -1,5 +1,7 @@
 """Data conversion helpers for the in-tree PEP 517 build backend."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable, Iterator, Mapping
 from itertools import chain
 from re import sub as _substitute_with_regexp

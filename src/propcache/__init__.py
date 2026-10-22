@@ -1,5 +1,7 @@
 """propcache: An accelerated property cache for Python classes."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 _PUBLIC_API = ("cached_property", "under_cached_property")

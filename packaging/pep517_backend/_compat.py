@@ -1,5 +1,7 @@
 """Cross-python stdlib shims."""
 
+from __future__ import annotations
+
 import os
 import sys
 from collections.abc import Iterator

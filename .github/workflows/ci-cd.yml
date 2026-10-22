@@ -1,714 +1,270 @@
 ---
 
-name: CI/CD
+name: CI
 
 on:
-  merge_group:
   push:
     branches:
     - master
-    - >-
-      [0-9].[0-9]+
-    tags:
-    - v*
   pull_request:
     branches:
     - master
-    - >-
-      [0-9].[0-9]+
-  schedule:
-  - cron: 0 6 * * *  # Daily 6AM UTC build
+  workflow_dispatch:
 
 
 concurrency:
-  group: ${{ github.ref }}-${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 
 env:
-  COLOR: >-  # Supposedly, pytest or coveragepy use this
-    yes
-  FORCE_COLOR: 1  # Request colored output from CLI tools supporting it
-  MYPY_FORCE_COLOR: 1  # MyPy's color enforcement
+  COLOR: yes
+  FORCE_COLOR: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   PIP_NO_PYTHON_VERSION_WARNING: 1
-  PIP_NO_WARN_SCRIPT_LOCATION: 1
-  PRE_COMMIT_COLOR: always
-  PROJECT_NAME: propcache
-  PY_COLORS: 1  # Recognized by the `py` package, dependency of `pytest`
+  # Pin the Cython version that generates the C extension: 3.2.4 is the last
+  # release that runs on Python 3.8, newer versions require Python 3.9+.
+  PIP_CONSTRAINT: requirements/cython.txt
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: 1
-  PYTHON_LATEST: 3.12
-  TOX_PARALLEL_NO_SPINNER: 1  # Disable tox's parallel run spinner animation
-  UV_PYTHON_PREFERENCE: only-managed  # avoid ancient system Python
-  TOX_TESTENV_PASSENV: >-  # Make tox-wrapped tools see color requests
-    CI
-    COLOR
-    FORCE_COLOR
-    GITHUB_*
-    MYPY_FORCE_COLOR
-    NO_COLOR
-    PIP_DISABLE_PIP_VERSION_CHECK
-    PIP_NO_PYTHON_VERSION_WARNING
-    PIP_NO_WARN_SCRIPT_LOCATION
-    PRE_COMMIT_COLOR
-    PY_COLORS
-    PYTEST_THEME
-    PYTEST_THEME_MODE
-    PYTHONDONTWRITEBYTECODE
-    PYTHONIOENCODING
-    PYTHONLEGACYWINDOWSSTDIO
-    PYTHONTRACEMALLOC
-    PYTHONUTF8
-  UPSTREAM_REPOSITORY_ID: >-
-    866565706
 
 
 jobs:
 
-  pre-setup:
-    name: ⚙️ Pre-set global build settings
+  tests:
+    name: tests / ${{ matrix.python }}
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-    defaults:
-      run:
-        shell: python
-    outputs:
-      # NOTE: These aren't env vars because the `${{ env }}` context is
-      # NOTE: inaccessible when passing inputs to reusable workflows.
-      cache-key-for-dep-files: >-
-        ${{ steps.calc-cache-key-files.outputs.cache-key-for-dep-files }}
-      dists-artifact-name: python-package-distributions
-      dist-version: ${{ steps.dist-version.outputs.dist-version }}
-      project-name: ${{ env.PROJECT_NAME }}
-      sdist-artifact-name: ${{ steps.artifact-name.outputs.sdist }}
-      pure-python-wheel-artifact-name: ${{ steps.artifact-name.outputs.wheel }}
-      upstream-repository-id: ${{ env.UPSTREAM_REPOSITORY_ID }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - python: '3.8'
+        - python: '3.9'
+        - python: '3.10'
+        - python: '3.11'
+        - python: '3.12'
+        - python: '3.13'
+        - python: '3.13t'
+        - python: '3.14'
+        - python: '3.14t'
+        - python: '3.15'
+        - python: '3.15t'
+        - python: 'pypy-3.10'
+          no_extensions: true
     steps:
-    - name: Switch to using Python ${{ env.PYTHON_LATEST }} by default
+    - name: Check out the source tree
+      uses: actions/checkout@v7
+    - name: Set up Python ${{ matrix.python }}
       uses: actions/setup-python@v7
       with:
-        python-version: ${{ env.PYTHON_LATEST }}
-    - name: Check out src from Git
+        allow-prereleases: true
+        python-version: ${{ matrix.python }}
+    - name: Install test dependencies
+      run: >-
+        python -m pip install
+        --upgrade
+        -r requirements/test.txt
+    - name: Build and install propcache
+      run: >-
+        python -m pip install
+        --no-build-isolation
+        --force-reinstall
+        .
+    - name: Run the test suite against the C extension
+      if: ${{ !matrix.no_extensions }}
+      run: python -m pytest
+    - name: Run the test suite against the pure Python implementation
+      run: python -m pytest --no-c-extensions
+
+  sdist:
+    name: sdist + pure Python wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Check out the source tree
       uses: actions/checkout@v7
-    - name: >-
-        Calculate dependency files' combined hash value
-        for use in the cache key
-      id: calc-cache-key-files
-      uses: ./.github/actions/cache-keys
-    - name: Read the package version from the source tree
-      id: dist-version
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+    - name: Install build
+      run: python -m pip install build
+    - name: Build the sdist and the pure Python wheel
+      run: >-
+        python -m build
+        --outdir dist
+        --config-setting=pure-python=true
+        .
+    - name: Validate the metadata
       run: |
-        import re
-        from os import environ
-        from pathlib import Path
+        python -m pip install "twine>=6.2,<7"
+        python -m twine check --strict dist/*
+    - name: Upload the sdist and the pure Python wheel
+      uses: actions/upload-artifact@v7
+      with:
+        name: dist
+        path: dist/*
+        if-no-files-found: error
 
-        FILE_APPEND_MODE = 'a'
-        VERSION_RE = re.compile(
-            r'''^__version__\s*=\s*["']([^"']+)["']''',
-            re.M,
-        )
-
-        init_text = Path('src/propcache/__init__.py').read_text()
-        match = VERSION_RE.search(init_text)
-        if match is None:
-            raise SystemExit(
-                'Could not find __version__ in propcache/__init__.py',
-            )
-
-        with Path(environ['GITHUB_OUTPUT']).open(mode=FILE_APPEND_MODE) as out:
-            print(f'dist-version={match.group(1)}', file=out)
-    - name: Set the expected dist artifact names
-      id: artifact-name
-      env:
-        DIST_VERSION: ${{ steps.dist-version.outputs.dist-version }}
-      run: |
-        from os import environ
-        from pathlib import Path
-
-        FILE_APPEND_MODE = 'a'
-
-        project_name = '${{ env.PROJECT_NAME }}'
-        version = environ['DIST_VERSION']
-
-        with Path(environ['GITHUB_OUTPUT']).open(mode=FILE_APPEND_MODE) as out:
-            print(f'sdist={project_name}-{version}.tar.gz', file=out)
-            print(
-                f'wheel={project_name}-{version}-py3-none-any.whl',
-                file=out,
-            )
-
-
-  build:
-    name: >-
-      📦 Build dists v${{ needs.pre-setup.outputs.dist-version }}
-    needs:
-    - pre-setup
-
-    uses: tox-dev/workflow/.github/workflows/reusable-tox.yml@34958348bac6272f9729229f1b5679c76c3f9651  # yamllint disable-line rule:line-length
-    with:
-      cache-key-for-dependency-files: >-
-        ${{ needs.pre-setup.outputs.cache-key-for-dep-files }}
-      check-name: Build dists under 🐍3.12
-      job-dependencies-context: >-  # context for hooks
-        ${{ toJSON(needs) }}
-      python-version: '3.12'
-      runner-vm-os: ubuntu-latest
-      timeout-minutes: 3
-      toxenv: build-dists
-      xfail: false
-
-  lint:
-    name: 🧹 Linters${{ '' }}  # nest jobs under the same sidebar category
-    needs:
-    - build
-    - pre-setup  # transitive, for accessing settings
-
-    strategy:
-      matrix:
-        runner-vm-os:
-        - ubuntu-latest
-        python-version:
-        - 3.12
-        toxenv:
-        - pre-commit
-        - spellcheck-docs
-        - build-docs
-        - doctest-docs
-        xfail:
-        - false
-      fail-fast: false
-
-    uses: tox-dev/workflow/.github/workflows/reusable-tox.yml@34958348bac6272f9729229f1b5679c76c3f9651  # yamllint disable-line rule:line-length
-    with:
-      cache-key-for-dependency-files: >-
-        ${{ needs.pre-setup.outputs.cache-key-for-dep-files }}
-      dists-artifact-name: >-
-        ${{ needs.pre-setup.outputs.dists-artifact-name }}
-      post-toxenv-preparation-command: >-
-        ${{
-          matrix.toxenv == 'pre-commit'
-          && 'python -Im pre_commit install-hooks'
-          || ''
-        }}
-      python-version: >-
-        ${{ matrix.python-version }}
-      runner-vm-os: >-
-        ${{ matrix.runner-vm-os }}
-      # NOTE: `pre-commit --show-diff-on-failure` and
-      # NOTE: `sphinxcontrib-spellcheck` with Git authors allowlist enabled
-      # NOTE: both depend on the presence of a Git repository.
-      source-tarball-name: >-
-        ${{
-          !contains(
-            fromJSON('["pre-commit", "spellcheck-docs"]'),
-            matrix.toxenv
-          )
-          && needs.pre-setup.outputs.sdist-artifact-name
-          || ''
-        }}
-      # NOTE: `pre-commit` and `sphinxcontrib-spellcheck` both depend on Git.
-      # NOTE: They may get slower due to network I/O, hence bigger timeout.
-      timeout-minutes: >-
-        ${{
-          !contains(
-            fromJSON('["pre-commit", "spellcheck-docs"]'),
-            matrix.toxenv
-          )
-          && 4
-          || 6
-        }}
-      toxenv: >-
-        ${{ matrix.toxenv }}
-      xfail: >-
-        ${{ matrix.xfail }}
-
-  build-wheels-for-tested-arches:
-    name: >-  # ${{ '' } is a hack to nest jobs under the same sidebar category
-      📦 Build wheels for tested arches${{ '' }}
-    needs:
-    - build
-    - pre-setup  # transitive, for accessing settings
-    strategy:
-      matrix:
-        os:
-        - ubuntu-latest
-        - windows-latest
-        - windows-11-arm
-        - macos-latest
-        tag:
-        - ''
-        - 'musllinux'
-        exclude:
-        - os: windows-latest
-          tag: 'musllinux'
-        - os: windows-11-arm
-          tag: 'musllinux'
-        - os: macos-latest
-          tag: 'musllinux'
-        - os: ubuntu-latest
-          tag: >-
-           ${{
-           (github.event_name != 'push' || github.ref_type != 'tag')
-           && 'musllinux' || 'none'
-           }}
-    uses: ./.github/workflows/reusable-build-wheel.yml
-    with:
-      os: ${{ matrix.os }}
-      tag: ${{ matrix.tag }}
-      wheel-tags-to-skip: >-
-        ${{
-        (github.event_name != 'push' || github.ref_type != 'tag')
-        && '*_i686
-        *-macosx_universal2
-        *-musllinux_*
-        *-win32'
-        || (matrix.tag == 'musllinux') && '*-manylinux_*'
-        || '*-musllinux_*'
-        }}
-      source-tarball-name: >-
-        ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-      dists-artifact-name: ${{ needs.pre-setup.outputs.dists-artifact-name }}
-      cython-tracing: >-  # Cython line tracing for coverage collection
-        ${{
-          (github.event_name == 'push' && github.ref_type == 'tag')
-          && 'false'
-          || 'true'
-        }}
-      wheel-tests-to-skip: >-  # Off-tag, the `test` job tests these wheels
-        ${{
-        (github.event_name != 'push' || github.ref_type != 'tag')
-        && '*'
-        || ''
-        }}
-      macos-archs: >-  # Off-tag, only the arch the `test` job runs on
-        ${{
-        (github.event_name == 'push' && github.ref_type == 'tag')
-        && 'x86_64 arm64 universal2'
-        || 'arm64'
-        }}
-
-  metadata-validation:
-    name: 🧹 Validate metadata of all built dists
-    needs:
-    - build  # sdist + pure-python wheel
-    - build-wheels-for-tested-arches  # cibuildwheel binary wheels
-    - pre-setup  # transitive, for accessing settings
-
-    uses: tox-dev/workflow/.github/workflows/reusable-tox.yml@34958348bac6272f9729229f1b5679c76c3f9651  # yamllint disable-line rule:line-length
-    with:
-      cache-key-for-dependency-files: >-
-        ${{ needs.pre-setup.outputs.cache-key-for-dep-files }}
-      check-name: 🧹 Validate metadata of all built dists
-      dists-artifact-name: >-
-        ${{ needs.pre-setup.outputs.dists-artifact-name }}
-      job-dependencies-context: >-  # context for hooks
-        ${{ toJSON(needs) }}
-      python-version: '3.12'
-      runner-vm-os: ubuntu-latest
-      source-tarball-name: >-
-        ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-      timeout-minutes: 3
-      toxenv: metadata-validation
-      xfail: false
-
-  test:
-    name: Test
-    needs:
-    - build  # transitive, ensures dists are built
-    - build-wheels-for-tested-arches
-    - pre-setup  # transitive, for accessing settings
-    strategy:
-      matrix:
-        pyver:
-        - 3.15t
-        - 3.15
-        - 3.14t
-        - 3.14
-        # Skipping 3.13t because cibuildwheel dropped support
-        - 3.13
-        - 3.12
-        - 3.11
-        - >-
-          3.10
-        no-extensions: ['', 'Y']
-        os:
-        - ubuntu-latest
-        - macos-latest
-        - windows-latest
-        - windows-11-arm
-        experimental: [false]
-        exclude:
-        - os: macos-latest
-          no-extensions: Y
-        - os: windows-latest
-          no-extensions: Y
-        - os: windows-11-arm
-          no-extensions: Y
-        - os: windows-11-arm
-          pyver: '3.10'  # not supported by setup-python action
-        include:
-        - pyver: pypy-3.10
-          no-extensions: Y
-          experimental: false
-          os: ubuntu-latest
-      fail-fast: false
+  wheels:
+    name: wheels / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
-    continue-on-error: ${{ matrix.experimental }}
-    steps:
-    - name: Checkout project
-      uses: actions/checkout@v7
-    - name: Retrieve the project source from an sdist inside the GHA artifact
-      uses: re-actors/checkout-python-sdist@release/v2
-      with:
-        source-tarball-name: >-
-          ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-        workflow-artifact-name: >-
-          ${{ needs.pre-setup.outputs.dists-artifact-name }}
-    - name: Download distributions
-      uses: actions/download-artifact@v8
-      with:
-        path: dist
-        pattern: ${{ needs.pre-setup.outputs.dists-artifact-name }}*
-        merge-multiple: true
-    - name: Setup Python ${{ matrix.pyver }}
-      id: python-install
-      uses: astral-sh/setup-uv@v10.1.0
-      with:
-        python-version: ${{ matrix.pyver }}
-        activate-environment: true
-        # Pre-release interpreters (alpha/beta/rc, `-dev`, or `~`-pinned
-        # latest) skip the wheel cache so each run resolves freshly
-        # against whatever the current snapshot ships.
-        enable-cache: >-
-          ${{
-            (
-              startsWith(matrix.pyver, '~')
-              || endsWith(matrix.pyver, '-dev')
-              || contains(matrix.pyver, 'a')
-              || contains(matrix.pyver, 'b')
-              || contains(matrix.pyver, 'rc')
-            )
-            && 'false'
-            || 'true'
-          }}
-    - name: Install dependencies
-      run: uv pip install -r requirements/codspeed.txt
-    - name: Install ${{ env.PROJECT_NAME }} from a pre-built wheel
-      run: >-
-        uv pip install
-        --find-links=./dist
-        --no-index
-        --no-deps
-        --force-reinstall
-        --only-binary=:all:
-        '${{ env.PROJECT_NAME }}'
-    - name: Produce the C-files for the Coverage.py Cython plugin
-      if: >-  # Only works if the dists were built with line tracing
-        !matrix.no-extensions
-        && (github.event_name != 'push' || github.ref_type != 'tag')
-      env:
-        PYTHONPATH: packaging/
-      run: |
-        set -eEuo pipefail
-
-        uv pip install expandvars
-        python -m pep517_backend.cli translate-cython
-      shell: bash
-    - name: Disable the Cython.Coverage Produce plugin
-      if: >-  # Only works if the dists were built with line tracing
-        matrix.no-extensions
-        || (github.event_name == 'push' && github.ref_type == 'tag')
-      run: |
-        set -eEuo pipefail
-        sed -i.bak 's/^\s\{2\}Cython\.Coverage$//g' .coveragerc
-      shell: bash
-    - name: Run unittests
-      run: >-
-        python -Im
-        pytest
-        -v
-        --cov-report xml
-        --junitxml=.test-results/pytest/test.xml
-        --${{ matrix.no-extensions == 'Y' && 'no-' || '' }}c-extensions
-    - name: Produce markdown test summary from JUnit
-      if: >-
-        !cancelled()
-      uses: test-summary/action@v2.6
-      with:
-        paths: .test-results/pytest/test.xml
-    - name: Append coverage results to Job Summary
-      if: >-
-        !cancelled()
-      continue-on-error: true
-      run: >-
-        python -Im coverage report --format=markdown
-        >> "${GITHUB_STEP_SUMMARY}"
-      shell: bash
-    - name: Re-run the failing tests with maximum verbosity
-      if: >-
-        !cancelled()
-        && failure()
-      run: >-  # `exit 1` makes sure that the job remains red with flaky runs
-        python -Im
-        pytest
-        --no-cov
-        -vvvvv
-        --lf
-        -rA
-        --${{ matrix.no-extensions == 'Y' && 'no-' || '' }}c-extensions
-        && exit 1
-      shell: bash
-    - name: Send coverage data to Codecov
-      if: >-
-        !cancelled()
-      uses: codecov/codecov-action@v7
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: ./coverage.xml
-        flags: >-
-          CI-GHA,
-          pytest,
-          OS-${{ runner.os }},
-          VM-${{ matrix.os }},
-          Py-${{ steps.python-install.outputs.python-version }}
-        fail_ci_if_error: false
-
-  benchmark:
-    name: Benchmark
-    needs:
-    - build  # transitive, ensures dists are built
-    - build-wheels-for-tested-arches
-    - pre-setup  # transitive, for accessing settings
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-    - name: Checkout project
-      uses: actions/checkout@v7
-    - name: Retrieve the project source from an sdist inside the GHA artifact
-      uses: re-actors/checkout-python-sdist@release/v2
-      with:
-        source-tarball-name: >-
-          ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-        workflow-artifact-name: >-
-          ${{ needs.pre-setup.outputs.dists-artifact-name }}
-    - name: Download distributions
-      uses: actions/download-artifact@v8
-      with:
-        path: dist
-        pattern: ${{ needs.pre-setup.outputs.dists-artifact-name }}*
-        merge-multiple: true
-
-    - name: Setup Python 3.13
-      id: python-install
-      uses: astral-sh/setup-uv@v10.1.0
-      with:
-        python-version: 3.13
-        activate-environment: true
-        enable-cache: true
-    - name: Install dependencies
-      run: uv pip install -r requirements/codspeed.txt
-    - name: Install ${{ env.PROJECT_NAME }} from a pre-built wheel
-      run: >-
-        uv pip install
-        --find-links=./dist
-        --no-index
-        --no-deps
-        --force-reinstall
-        --only-binary=:all:
-        '${{ env.PROJECT_NAME }}'
-    - name: Run benchmarks
-      uses: CodSpeedHQ/action@v5.2.1
-      with:
-        token: ${{ secrets.CODSPEED_TOKEN }}
-        run: python -Im pytest --no-cov -vvvvv --codspeed
-        mode: instrumentation
-
-  test-summary:
-    name: Test matrix status
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    needs:
-    - lint
-    - metadata-validation
-    - test
-    steps:
-    - name: Decide whether the needed jobs succeeded or failed
-      uses: re-actors/alls-green@release/v1
-      with:
-        jobs: ${{ toJSON(needs) }}
-
-  pre-deploy:
-    name: Pre-Deploy
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    needs: test-summary
-    # Run only on pushing a tag
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    steps:
-    - name: Dummy
-      run: |
-        echo "Predeploy step"
-
-  build-wheels-for-odd-archs:
-    name: >-  # ${{ '' } is a hack to nest jobs under the same sidebar category
-      📦 Build wheels for odd arches${{ '' }}
-    needs:
-    - build
-    - pre-deploy
-    - pre-setup  # transitive, for accessing settings
+    timeout-minutes: 90
     strategy:
+      fail-fast: false
       matrix:
-        qemu:
-        - aarch64
-        - ppc64le
-        - s390x
-        - armv7l
-        - riscv64
-        tag:
-        - ''
-        - musllinux
-        exclude:
-        - tag: ''
-          qemu: armv7l
         include:
-        # Build aarch64 natively on the GH-hosted ARM runner instead of
-        # x86_64-under-QEMU; this drops the build from ~40 min of
-        # emulation to a few minutes of native execution. Each
-        # (qemu, tag) combo is listed explicitly so the include
-        # unambiguously augments the existing matrix cell rather than
-        # relying on the partial-key merge behaviour of `matrix.include`.
-        - qemu: aarch64
-          tag: ''
-          runner-vm-os: ubuntu-24.04-arm
-          native-arch: true
-        - qemu: aarch64
-          tag: musllinux
-          runner-vm-os: ubuntu-24.04-arm
-          native-arch: true
-        # armv7l also moves to aarch64 hosts. QEMU stays registered so
-        # binfmt picks up the 32-bit ARM userspace handler regardless of
-        # whether the host kernel has CONFIG_COMPAT enabled. Even with
-        # emulation, aarch64-on-aarch64 hosting beats x86_64 by a wide
-        # margin. armv7l's ``tag: ''`` cell is excluded above, so only
-        # the musllinux cell is overridden here.
-        - qemu: armv7l
-          tag: musllinux
-          runner-vm-os: ubuntu-24.04-arm
-    uses: ./.github/workflows/reusable-build-wheel.yml
-    with:
-      os: ${{ matrix.runner-vm-os || 'ubuntu-latest' }}
-      qemu: ${{ matrix.qemu }}
-      native-arch: ${{ matrix.native-arch && true || false }}
-      tag: ${{ matrix.tag }}
-      wheel-tags-to-skip: >-
-        ${{
-        (matrix.tag == 'musllinux')
-        && '*-manylinux_*'
-        || '*-musllinux_*'
-        }}
-      source-tarball-name: >-
-        ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-      dists-artifact-name: ${{ needs.pre-setup.outputs.dists-artifact-name }}
-
-  deploy:
-    name: Deploy
-    needs:
-    - build
-    - build-wheels-for-odd-archs
-    - build-wheels-for-tested-arches
-    - pre-setup  # transitive, for accessing settings
-    runs-on: ubuntu-latest
-    timeout-minutes: 14
-
-    permissions:
-      contents: write  # IMPORTANT: mandatory for making GitHub Releases
-      id-token: write  # IMPORTANT: mandatory for trusted publishing & sigstore
-
-    environment:
-      name: pypi
-      url: https://pypi.org/p/${{ env.PROJECT_NAME }}
-
+        - name: manylinux2014 + musllinux_1_2 x86_64
+          os: ubuntu-latest
+          archs: x86_64
+          manylinux_image: quay.io/pypa/manylinux2014_x86_64:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_x86_64:2026.05.02-2
+          artifact: wheel-linux-x86_64
+        - name: manylinux2014 + musllinux_1_2 i686
+          os: ubuntu-latest
+          archs: i686
+          manylinux_image: quay.io/pypa/manylinux2014_i686:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_i686:2026.05.02-2
+          artifact: wheel-linux-i686
+        - name: manylinux2014 + musllinux_1_2 aarch64
+          os: ubuntu-24.04-arm
+          archs: aarch64
+          manylinux_image: quay.io/pypa/manylinux2014_aarch64:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_aarch64:2026.05.02-2
+          artifact: wheel-linux-aarch64
+        - name: manylinux2014 + musllinux_1_2 ppc64le
+          os: ubuntu-latest
+          archs: ppc64le
+          qemu: ppc64le
+          manylinux_image: quay.io/pypa/manylinux2014_ppc64le:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_ppc64le:2026.05.02-2
+          artifact: wheel-linux-ppc64le
+        - name: manylinux2014 + musllinux_1_2 s390x
+          os: ubuntu-latest
+          archs: s390x
+          qemu: s390x
+          manylinux_image: quay.io/pypa/manylinux2014_s390x:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_s390x:2026.05.02-2
+          artifact: wheel-linux-s390x
+        - name: manylinux_2_39 + musllinux_1_2 riscv64
+          os: ubuntu-latest
+          archs: riscv64
+          qemu: riscv64
+          manylinux_image: quay.io/pypa/manylinux_2_39_riscv64:2026.05.02-2
+          musllinux_image: quay.io/pypa/musllinux_1_2_riscv64:2026.05.02-2
+          # Upstream starts at 3.10 for this architecture.
+          skip: 'cp38-* cp39-*'
+          artifact: wheel-linux-riscv64
+        - name: musllinux_1_2 armv7l
+          os: ubuntu-24.04-arm
+          archs: armv7l
+          qemu: arm
+          musllinux_image: quay.io/pypa/musllinux_1_2_armv7l:2026.05.02-2
+          skip: '*-manylinux_*'
+          artifact: wheel-linux-armv7l
+        # Build x86_64 and arm64 separately: pip picks the native wheel and
+        # each runner tests the architecture it built.
+        - name: macOS x86_64
+          os: macos-15-intel
+          archs: x86_64
+          artifact: wheel-macos-x86_64
+        - name: macOS arm64
+          os: macos-15
+          archs: arm64
+          install_native_py38: true
+          artifact: wheel-macos-arm64
+        - name: Windows amd64
+          os: windows-2022
+          archs: AMD64
+          artifact: wheel-windows-amd64
+        - name: Windows win32
+          os: windows-2022
+          archs: x86
+          artifact: wheel-windows-win32
+        - name: Windows arm64
+          os: windows-11-arm
+          archs: ARM64
+          # CPython 3.8 has no arm64 installer; cibuildwheel can install the
+          # experimental 3.9 arm64 build, so start there.
+          skip: 'cp38-*'
+          artifact: wheel-windows-arm64
+    env:
+      CIBW_ARCHS: ${{ matrix.archs }}
+      CIBW_BUILD: >-
+        cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp313t-* cp314-* cp314t-*
+      # The containers do not ship uv, and pip is available everywhere.
+      CIBW_BUILD_FRONTEND: build
+      CIBW_SKIP: ${{ matrix.skip }}
+      CIBW_TEST_COMMAND: python -m pytest -v --no-cov {project}/tests
     steps:
-    - name: Retrieve the project source from an sdist inside the GHA artifact
-      uses: re-actors/checkout-python-sdist@release/v2
+    - name: Check out the source tree
+      uses: actions/checkout@v7
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v7
       with:
-        source-tarball-name: >-
-          ${{ needs.pre-setup.outputs.sdist-artifact-name }}
-        workflow-artifact-name: >-
-          ${{ needs.pre-setup.outputs.dists-artifact-name }}
-
-    - name: Download distributions
-      uses: actions/download-artifact@v8
+        python-version: '3.12'
+    - name: Set up QEMU
+      if: matrix.qemu
+      uses: docker/setup-qemu-action@v3
       with:
-        path: dist
-        pattern: ${{ needs.pre-setup.outputs.dists-artifact-name }}*
-        merge-multiple: true
-    - run: |
-        tree
-    - name: Login
+        platforms: ${{ matrix.qemu }}
+    # cibuildwheel's CPython 3.8 installer is x86_64-only, so install the
+    # native arm64 universal2 build from python.org before building wheels.
+    - name: Install native arm64 CPython 3.8
+      if: matrix.install_native_py38
       run: |
-        echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-    - name: Check whether the GitHub Release already exists
-      # Allows re-running the deploy job after a partial failure (e.g. PyPI
-      # upload error) without the Make Release step failing with HTTP 422
-      # because the tag/release was created on a prior attempt. Treat
-      # only the literal `release not found` reply as "does not exist";
-      # other failures (auth, rate-limit, network) re-raise so the job
-      # fails loudly instead of falling through to Make Release.
-      id: gh-release
+        curl -fsSL -o /tmp/Python38.pkg https://www.python.org/ftp/python/3.8.10/python-3.8.10-macos11.pkg
+        sudo installer -pkg /tmp/Python38.pkg -target /
+        sh "/Applications/Python 3.8/Install Certificates.command"
+        /Library/Frameworks/Python.framework/Versions/3.8/bin/python3 -c 'import platform; print(platform.machine()); assert platform.machine() == "arm64"'
+    - name: Build cp38-cp314t wheels
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TAG: ${{ github.ref_name }}
+        CIBW_ENABLE: cpython-freethreading
+        # Only one arch is built per job, so the image for that arch is the
+        # only one cibuildwheel reads; the rest are ignored.
+        CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MANYLINUX_I686_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MANYLINUX_PPC64LE_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MANYLINUX_S390X_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ matrix.manylinux_image }}
+        CIBW_MUSLLINUX_X86_64_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_I686_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_AARCH64_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_PPC64LE_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_S390X_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_ARMV7L_IMAGE: ${{ matrix.musllinux_image }}
+        CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ matrix.musllinux_image }}
       run: |
-        if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" \
-            >/dev/null 2>err; then
-          echo 'exists=true' >> "${GITHUB_OUTPUT}"
-        elif grep -qx 'release not found' err; then
-          echo 'exists=false' >> "${GITHUB_OUTPUT}"
-        else
-          cat err >&2
-          exit 1
-        fi
-    - name: Make Release
-      if: steps.gh-release.outputs.exists != 'true'
-      uses: aio-libs/create-release@v1.6.6
+        python -m pip install "cibuildwheel==3.4.1"
+        python -m cibuildwheel --output-dir wheelhouse .
+    # cibuildwheel 4.x dropped CPython 3.8, so cp315/cp315t need a second
+    # pass. It always builds free-threaded wheels (the v3 enable group is
+    # not accepted), and its 2026.09 images are the first ones with 3.15.
+    - name: Build cp315 wheels
+      env:
+        CIBW_BUILD: cp315-* cp315t-*
+      run: |
+        python -m pip install "cibuildwheel==4.2.1"
+        python -m cibuildwheel --output-dir wheelhouse .
+    - name: Upload the wheels
+      uses: actions/upload-artifact@v7
       with:
-        changes_file: CHANGES.rst
-        version_file: src/${{ env.PROJECT_NAME }}/__init__.py
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        head_line: >-
-          {version}\n=+\n\n\*\({date}\)\*\n
-        fix_issue_regex: >-
-          :issue:`(\d+)`
-        fix_issue_repl: >-
-          #\1
+        name: ${{ matrix.artifact }}
+        path: ./wheelhouse/*.whl
+        if-no-files-found: error
 
-    - name: >-
-        Publish 🐍📦 to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+  merge-wheels:
+    name: Merge wheel artifacts
+    needs:
+    - wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: Merge the wheel artifacts
+      uses: actions/upload-artifact/merge@v7
       with:
-        # Allow re-running the deploy job after a partial PyPI upload
-        # without failing on dists that were already published.
-        skip-existing: true
-
-    - name: Sign the dists with Sigstore
-      uses: sigstore/gh-action-sigstore-python@v3.5.0
-      with:
-        inputs: >-
-          ./dist/${{ needs.pre-setup.outputs.sdist-artifact-name }}
-          ./dist/*.whl
-
-    - name: Upload artifact signatures to GitHub Release
-      # Confusingly, this action also supports updating releases, not
-      # just creating them. This is what we want here, since we've manually
-      # created the release above.
-      uses: softprops/action-gh-release@v3
-      with:
-        # dist/ contains the built packages, which smoketest-artifacts/
-        # contains the signatures and certificates.
-        files: dist/**
-
-...
+        name: wheels
+        pattern: wheel-*
+        delete-merged: true

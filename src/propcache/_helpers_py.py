@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from functools import cached_property
-from typing import Any, Generic, Protocol, TypeVar, overload
+from typing import Any, Generic, Mapping, Protocol, TypeVar, overload
 
 __all__ = ("under_cached_property", "cached_property")
 

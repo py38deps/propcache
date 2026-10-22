@@ -1,5 +1,7 @@
 """Tests for the in-tree PEP 517 build backend."""
 
+from __future__ import annotations
+
 import os
 import shlex
 import sys

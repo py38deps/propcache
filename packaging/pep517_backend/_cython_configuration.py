@@ -75,7 +75,9 @@ def get_local_cython_config() -> Config:
         # This section can contain cythonize options
         # NAME = "VALUE"
     """
-    config_toml_txt = (Path.cwd().resolve() / 'pyproject.toml').read_text()
+    config_toml_txt = (Path.cwd().resolve() / 'pyproject.toml').read_text(
+        encoding='utf-8',
+    )
     config_mapping = load_toml_from_string(config_toml_txt)
     return config_mapping['tool']['local']['cythonize']  # type: ignore[no-any-return]
 

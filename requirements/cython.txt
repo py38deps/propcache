@@ -1,1 +1,2 @@
-cython==3.3.0
+cython==3.3.0; python_version >= "3.9"
+cython==3.2.4; python_version < "3.9"
